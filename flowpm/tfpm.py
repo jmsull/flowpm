@@ -9,6 +9,7 @@ from astropy.cosmology import Planck15
 
 from .utils import white_noise, c2r3d, r2c3d, cic_paint, cic_readout
 from .kernels import fftk, laplace_kernel, gradient_kernel, longrange_kernel
+from .kernels import shortrange_kernel, chain_mesh
 from .background import MatterDominated
 
 __all__ = ['linear_field', 'lpt_init', 'nbody']
@@ -17,6 +18,7 @@ PerturbationGrowth = lambda cosmo, *args, **kwargs: MatterDominated(Omega0_lambd
                                                                     Omega0_m = cosmo.Om0,
                                                                     Omega0_k = cosmo.Ok0,
                                                                     *args, **kwargs)
+
 
 def linear_field(nc, boxsize, pk, batch_size=1,
                  kvec=None, seed=None, name=None, dtype=tf.float32):
@@ -41,6 +43,7 @@ def linear_field(nc, boxsize, pk, batch_size=1,
   linfield: tensor (batch_size, nc, nc, nc)
     Realization of the linear field with requested power spectrum
   """
+
   with tf.name_scope(name, "LinearField"):
     if kvec is None:
       kvec = fftk((nc, nc, nc), symmetric=False)
@@ -81,7 +84,7 @@ def lpt1(dlin_k, pos, kvec=None, name=None):
       displacement.append(cic_readout(disp, pos))
     displacement = tf.stack(displacement, axis=2)
     return displacement
-#    
+#
 def lpt2_source(dlin_k, kvec=None, name=None):
   """ Generate the second order LPT source term.
 
@@ -171,7 +174,7 @@ def apply_longrange(x, delta_k, split=0, factor=1, kvec=None, name=None):
   """ like long range, but x is a list of positions
   TODO: Better documentation, also better name?
   """
-  # use the four point kernel to suppresse artificial growth of noise like terms
+
   with tf.name_scope(name, "ApplyLongrange", [x, delta_k]):
     shape = delta_k.get_shape()
     batch_size, nc = shape[1], shape[2].value
@@ -197,6 +200,176 @@ def apply_longrange(x, delta_k, split=0, factor=1, kvec=None, name=None):
     f = tf.multiply(f, factor)
     return f
 
+
+def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, name=None):#x,nc,cm_scale=4, eps_s=.05, name=None):
+
+  '''
+  Note that everything is in numpy right now for testing - using TF at the moment is too slow to run in my dumb implementation of loops.
+  Input: x - positions, tensor (batch_size, npart,3) - Right now taking state for debug using but put it back to x later
+         nc - require this to be passed to compute chaining mesh, might want to pass a subset of particles != npart
+  Optional: cutoff - where to start the chaining mesh in grid units
+            eps_s - softening length in grid units
+
+  Output: force_s - short range force updates, tensor (batch_size,npart,3)
+
+  '''
+
+  '''Also put this back to [x] when done debugging'''
+  with tf.name_scope(name, "ApplyShortrange", [state]): #[x]):
+      x,p,f = state[0],state[1],state[2]
+      shape = x.get_shape()
+      batch_size,npart = shape[0].value,shape[1].value
+
+      #Have to do this to be able to do the particle computation, if you are forced to use
+      #TF tensors when constructing bins (i.e. without calling x to get bin values), it is
+      #excruciatingly slow (10^4 x slower than non-TF numpy for loop) due to graph additions in every loop - need to figure this out...
+
+      '''For debgging/diagnostic'''
+      with tf.Session() as sess:
+          x_eval = x.eval()
+          p_eval = p.eval()
+          f_eval = f.eval()
+
+      #bin the particles
+      num_bins_1d = int(nc/cm_scale)
+      num_bins = num_bins_1d**2
+      bin_size=nc/num_bins_1d
+      nc_x,nc_y,nc_z = nc,nc,nc
+
+
+      cm_cells,nbx,nby,nbz = chain_mesh((nc_x,nc_y,nc_z),cm_scale,binLengths=True) #assume full box for now, but could e.g. split along z axis an make nc_z shorter than others
+      print('Cmcells shape',cm_cells.shape)
+      print('bin size',bin_size)
+      print('num_bins_1d',num_bins_1d)
+      print('xeval shape',x_eval.shape)
+
+
+      #probably a better way to do this in one line but...
+      neighbor_stencil_array = np.array([
+                                       [-1, -1, -1],[-1, 0, -1],[-1, 1, -1],
+                                       [0, -1, -1],[0, 0, -1],[0, 1, -1],
+                                       [1, -1, -1],[1, 0, -1],[1, 1, -1],
+
+                                       [-1, -1, 0],[-1, 0, 0],[-1, 1, 0],
+                                       [0, -1, 0],[0, 0, 0],[0, 1, 0],
+                                       [1, -1, 0],[1, 0, 0],[1, 1, 0],
+
+                                       [-1, -1, 1],[-1, 0, 1],[-1, 1, 1],
+                                       [0, -1, 1],[0, 0, 1],[0, 1, 1],
+                                       [1, -1, 1],[1, 0, 1],[1, 1, 1]
+                                       ],dtype=np.int32)
+
+      #probably some better ways to do this with broadcasting...
+      f_batch = [] #to store the total sr force per batch
+
+      '''Loop over '''
+      for batch_idx in range(batch_size): #presumably we will not run multiple batches with particles on?
+
+          bin_array = ((x_eval[batch_idx]% nc)/bin_size).astype(np.int32) #send negative x to other side where they belong
+
+          #Hockney and Eastwood Chaining mesh - for now will store bin locations as vectors but can come back and set C index
+          HOC_array = np.zeros((nbx,nby,nbz),dtype=np.int32)
+          bin_count_array = np.copy(HOC_array)
+
+          LL = np.zeros((npart),dtype=np.int32) #linked list for particles in the same bin within the same bin, 0 o.w.
+
+
+          '''Not TF - don't need it for bin bookkeeping'''
+          #fill the chaining mesh
+          for i in range(npart):
+              bin_vector = bin_array[i]
+
+              LL[i] = (HOC_array[bin_vector[0],bin_vector[1],bin_vector[2]])
+              HOC_array[bin_vector[0],bin_vector[1],bin_vector[2]] = i+1
+              bin_count_array[bin_vector[0],bin_vector[1],bin_vector[2]]+=1
+
+          f_all = [] #to store the total sr force for one particle
+
+          p_rms,p_max,f_max =[],[],[] #debug lists
+
+
+          for b in cm_cells: #loop over CM cells
+              p_tmp,f_tmp =[],[] #debug lists
+
+              for k in range(bin_count_array[b[0],b[1],b[2]]): #loop once over all particles via bins * particles_per_bin ~ O(N)
+                  #need extra factor of 1 because HOC starts at 1
+
+                  idx1 = LL[HOC_array[b[0],b[1],b[2]]-k-1] #get the index of the "head" particle of this CM cell, decrement until run out of particles
+
+                  #debug info for checking timestep
+                  p_tmp.append(p_eval[batch_idx,idx1])
+                  f_tmp.append(f_eval[batch_idx,idx1])
+
+                  f_neighbor = [] #to store force to be computed on this particle due to neighbor particles
+                  for j in range(27):
+                      nb = (b+neighbor_stencil_array[j])
+
+                      #PBCs
+                      nb = nb % num_bins_1d
+
+                      for m in range(bin_count_array[nb[0],nb[1],nb[2]]): #loop once over all neighbor particles via neighbor_cell * particles_per_cell~ O(27*parts_per_cm_cell)
+                            idx2 = LL[HOC_array[nb[0],nb[1],nb[2]]-m -1]
+                            f_neighbor.append(shortrange_kernel(x_eval[batch_idx,idx1],x_eval[batch_idx,idx2],eps_s)) #actually evaluate force between 2 particles
+
+                  f_single = np.stack(f_neighbor,axis=0)
+                  f_all.append(np.sum(f_single,axis=0)) #sum force on a single particle
+
+         #timestep debug statements ---from here /*...
+              if(len(p_tmp)>0):
+                  p_rms.append(np.sqrt(np.mean(np.stack(p_tmp,axis=0)**2)))
+                  p_max.append(np.max(np.stack(p_tmp,axis=0)**2))
+                  f_max.append(np.max(np.stack(f_tmp,axis=0)**2))
+              else:
+                  p_rms.append(-1)
+                  p_max.append(-1)
+                  f_max.append(-1)
+          p_rms = np.stack(p_rms,axis=0)
+          p_max = np.stack(p_max,axis=0)
+          f_max = np.stack(f_max,axis=0)
+
+          def_step = 0.1 #the default a value of 0.1 for stages, used for
+
+          #for our fixed step, the equivalent value of eta and zeta
+          eta = def_step/(p_rms/f_max)
+          zeta = def_step*(p_max/bin_size)
+          print('eta',eta)
+          print('zeta',zeta)
+
+          print('global min eta',np.min(eta))
+          print('global max eta',np.max(eta))
+
+          print('global min zeta',np.min(zeta))
+          print('global max zeta',np.max(zeta))
+
+          #to here...*/
+
+          #the TF version
+          #for b in cm_cells:
+          # for bidx in range(cm_cells.shape[0]):
+          #     b = bin_tensor[batch_idx,bidx]
+          #     for k in range(tf.gather_nd(HOC,b)): #loop once over all particles via bins * particles_per_bin ~ O(N)
+          #         idx1 = LL[tf.gather_nd(HOC,b)-k]
+          #         f_single = []
+          #         for j in range(27):
+          #             nb = tf.add(b,neighbor_stencil[j])
+          #             for m in range(tf.gather_nd(HOC,nb)): #loop once over all neighbor particles via neighbor_bins * particles_per_bin ~ O(1)
+          #                   idx2 = LL[tf.gather_nd(HOC,nb)-m]
+          #                   f_single.append(shortrange_kernel(x[batch_idx,idx1],x[batch_idx,idx2],eps_s))
+          #         f_all.append(tf.sum(f_single,axis=0)) #sum along npart axis, not along coords
+          #f = tf.stack(f_all, axis=1) #stack along 2nd index, get (npart,3)
+
+
+          print('bin distr summary (for rough idea of load balance): min={0}, max={1}, mean={2:.2f}, median={3}, total/expected_total={4}'.format(
+                np.min(bin_count_array),np.max(bin_count_array),np.mean(bin_count_array),np.median(bin_count_array),np.sum(bin_count_array)/npart))
+
+          f_batch.append(np.stack(f_all,axis=0))
+
+      force_s = np.stack(f_batch,axis=0) \
+
+      #tf force_s = tf.stack(f_batch,axis=0)
+
+      return force_s
+
 def kick(state, ai, ac, af, cosmology=Planck15, dtype=np.float32, name=None,
          **kwargs):
   """Kick the particles given the state
@@ -210,7 +383,7 @@ def kick(state, ai, ac, af, cosmology=Planck15, dtype=np.float32, name=None,
   """
   with tf.name_scope(name, "Kick", [state]):
     pt = PerturbationGrowth(cosmology, a=[ai, ac, af], a_normalize=1.0)
-    fac = 1 / (ac ** 2 * pt.E(ac)) * (pt.Gf(af) - pt.Gf(ai)) / pt.gf(ac)
+    fac = 1 / (ac ** 2 * pt.E(ac)) * (pt.Gf(af) - pt.Gf(ai)) / pt.gf(ac) #fastPM kick
     indices = tf.constant([[1]])
     update = tf.expand_dims(tf.multiply(dtype(fac), state[2]), axis=0)
     shape = state.shape
@@ -231,7 +404,7 @@ def drift(state, ai, ac, af, cosmology=Planck15, dtype=np.float32,
   """
   with tf.name_scope(name, "Drift", [state]):
     pt = PerturbationGrowth(cosmology, a=[ai, ac, af], a_normalize=1.0)
-    fac = 1. / (ac ** 3 * pt.E(ac)) * (pt.Gp(af) - pt.Gp(ai)) / pt.gp(ac)
+    fac = 1. / (ac ** 3 * pt.E(ac)) * (pt.Gp(af) - pt.Gp(ai)) / pt.gp(ac) #fastPM drift
     indices = tf.constant([[0]])
     update = tf.expand_dims(tf.multiply(dtype(fac), state[1]), axis=0)
     shape = state.shape
@@ -240,14 +413,16 @@ def drift(state, ai, ac, af, cosmology=Planck15, dtype=np.float32,
     return state
 
 def force(state, nc, cosmology=Planck15, pm_nc_factor=1, kvec=None,
-          dtype=np.float32, name=None, **kwargs):
+          dtype=np.float32,
+          short_range=False, cm_scale=4,eps_s=0.05,
+          name=None, **kwargs):
   """
   Estimate force on the particles given a state.
 
   Parameters:
   -----------
   state: tensor
-    Input state tensor of shape (3, batch_size, npart, 3)
+    Input state tensor of shape (3, batch_size, npart, 3) #where does this leading 3 come from??
 
   boxsize: float
     Size of the simulation volume (Mpc/h) TODO: check units
@@ -268,10 +443,24 @@ def force(state, nc, cosmology=Planck15, pm_nc_factor=1, kvec=None,
     nbar = nc**3/ncf**3
 
     rho = cic_paint(rho, tf.multiply(state[0], pm_nc_factor), wts)
-    rho = tf.multiply(rho, 1./nbar)  ###I am not sure why this is not needed here
+    rho = tf.multiply(rho, 1./nbar)
     delta_k = r2c3d(rho, norm=ncf**3)
     fac = dtype(1.5 * cosmology.Om0)
     update = apply_longrange(tf.multiply(state[0], pm_nc_factor), delta_k, split=0, factor=fac)
+
+    '''Short-range force correction goes here.'''
+    #debugging to see how big accel in SR is vs LR
+    with tf.Session() as sess:
+        print('dbug max LR force is', tf.reduce_max(update).eval())
+
+    if(short_range):
+        '''Put this back to only passing state[0]  (x) when done debugging'''
+        update_short = apply_shortrange(state,nc,cm_scale=cm_scale,eps_s=eps_s)
+
+        update = tf.add(update, update_short)
+        with tf.Session() as sess:
+            print('dbug max SR force is', tf.reduce_max(update_short).eval())
+
 
     update = tf.expand_dims(update, axis=0)
 
@@ -279,11 +468,14 @@ def force(state, nc, cosmology=Planck15, pm_nc_factor=1, kvec=None,
     shape = state.shape
     update = tf.scatter_nd(indices, update, shape)
     mask = tf.stack((tf.ones_like(state[0]), tf.ones_like(state[0]), tf.zeros_like(state[0])), axis=0)
+
     state = tf.multiply(state, mask)
     state = tf.add(state, update)
     return state
 
-def nbody(state, stages, nc, cosmology=Planck15, pm_nc_factor=1, name=None):
+def nbody(state, stages, nc, cosmology=Planck15, pm_nc_factor=1,
+          short_range=False, cm_scale=4,eps_s=0.05,
+          name=None):
   """
   Integrate the evolution of the state across the givent stages
 
@@ -313,32 +505,36 @@ def nbody(state, stages, nc, cosmology=Planck15, pm_nc_factor=1, name=None):
     if len(stages) == 0:
       return state
 
-    ai = stages[0]
+    ai = stages[0] #stages is just an array of a values to timestep through
 
     # first force calculation for jump starting
-    state = force(state, nc, pm_nc_factor=pm_nc_factor, cosmology=cosmology)
+    state = force(state, nc, pm_nc_factor=pm_nc_factor, cosmology=cosmology,short_range=short_range,cm_scale=cm_scale,eps_s=eps_s) #initial shape will be (3, batch, nparts, 3)
 
-    x, p, f = ai, ai, ai
+    x, p, f = ai, ai, ai #state keeps a running list of position, momentum, and force coordinates in x,y,z for each batch
     # Loop through the stages
     for i in range(len(stages) - 1):
-        a0 = stages[i]
-        a1 = stages[i + 1]
-        ah = (a0 * a1) ** 0.5
+        a0 = stages[i] #current timestep
+        a1 = stages[i + 1] #upcoming timestep
+        ah = (a0 * a1) ** 0.5 #geometric mean - see fastPM
 
+        #Debug check drift in x, particles are going far out of box due to too large timestep
+        with tf.Session() as sess: print('min x={0}, max x={1}, step a={2}'.format(tf.reduce_max(state[0]).eval(),
+                                                                                 tf.reduce_min(state[0]).eval(),
+                                                                                 a0))
         # Kick step
-        state = kick(state, p, f, ah, cosmology=cosmology)
+        state = kick(state, p, f, ah, cosmology=cosmology) #kick at mean step
         p = ah
 
         # Drift step
-        state = drift(state, x, p, a1, cosmology=cosmology)
+        state = drift(state, x, p, a1, cosmology=cosmology) #drift at full step
         x = a1
 
         # Force
-        state = force(state, nc, pm_nc_factor=pm_nc_factor, cosmology=cosmology)
+        state = force(state, nc, pm_nc_factor=pm_nc_factor, cosmology=cosmology,short_range=short_range,cm_scale=cm_scale,eps_s=eps_s) #update force at full step
         f = a1
 
         # Kick again
-        state = kick(state, p, f, a1, cosmology=cosmology)
+        state = kick(state, p, f, a1, cosmology=cosmology) #kick at full step
         p = a1
 
     return state

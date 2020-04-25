@@ -24,9 +24,9 @@ def cic_paint(mesh, part, weight=None, name=None):
   """
   with tf.name_scope(name, "CiCPaint", [mesh, part, weight]):
     shape = tf.shape(mesh)
-    batch_size, nc = shape[0], shape[1]
+    batch_size, nc = shape[0], shape[1] 
 
-    # Extract the indices of all the mesh points affected by each particles
+
     part = tf.expand_dims(part, 2)
     floor = tf.floor(part)
     connection = tf.expand_dims(tf.constant([[[0, 0, 0], [1., 0, 0],[0., 1, 0],
@@ -44,7 +44,7 @@ def cic_paint(mesh, part, weight=None, name=None):
     neighboor_coords = tf.cast(neighboor_coords, tf.int32)
     neighboor_coords = tf.math.mod(neighboor_coords , nc)
 
-    # Adding batch dimension to the neighboor coordinates
+
     batch_idx = tf.range(0, batch_size)
     batch_idx = tf.reshape(batch_idx, (batch_size, 1, 1, 1))
     b = tf.tile(batch_idx, [1] + list(neighboor_coords.get_shape()[1:-1]) + [1])
@@ -78,7 +78,7 @@ def cic_readout(mesh, part, name=None):
     shape = tf.shape(mesh)
     batch_size, nc = shape[0], shape[1]
 
-    # Extract the indices of all the mesh points affected by each particles
+
     part = tf.expand_dims(part, 2)
     floor = tf.floor(part)
     connection = tf.expand_dims(tf.constant([[[0, 0, 0], [1., 0, 0],[0., 1, 0],

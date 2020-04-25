@@ -18,7 +18,6 @@ def fftk(shape, symmetric=True, finite=False, dtype=np.float64):
         kd = kd[:shape[d]//2 + 1]
     kdshape[d] = len(kd)
     kd = kd.reshape(kdshape)
-
     k.append(kd.astype(dtype))
   del kd, kdshape
   return k
@@ -63,7 +62,7 @@ def gradient_kernel(kvec, direction, order=0):
     Complex kernel
   """
   if order == 0:
-    wts = 1j * kvec[direction] 
+    wts = 1j * kvec[direction]
     wts = np.squeeze(wts)
     wts[len(wts) //2] = 0
     wts = wts.reshape(kvec[direction].shape)
@@ -97,3 +96,51 @@ def longrange_kernel(kvec, r_split):
     return np.exp(-kk * r_split**2)
   else:
     return 1.
+
+def shortrange_kernel(x1,x2,eps_s):
+    """
+    Computes short range force "kernel"
+    Parameters:
+    ----------
+    position: array of p
+
+    softening length for kernel: float,
+
+    Returns:
+    --------
+    force for a single particle - can make more efficient for more particles?
+
+    """
+    def srkern(p1,p2,eps_s):
+        "Input: single-particle Position  (3), particle you want to get current force on, softening length"
+        "Output: single-particle Force (3) - last entry of state"
+        "can probably come back and pass p2 as a list of positions...drop one of the inner loops"
+        disp = p2-p1
+        rsq=np.sum((disp**2),axis=0) #simple dist, square in place and sum, sqrt
+
+        kernel = (rsq  +eps_s**2)**(-3/2)
+        plummer = disp*kernel
+        return plummer
+
+    #Idea is to replace this with spline...
+
+    return srkern(x1,x2,eps_s)
+
+
+def chain_mesh(shape,cm_scale,binLengths=False):
+    "Return the chaining mesh for a given (rectangular) subset of the full grid"
+    "shape - (nc_x,nc_y,nc_z) "
+    "nc/cm_scale should be an integer"
+    num_bins_x,num_bins_y,num_bins_z = int(shape[0]/cm_scale),int(shape[1]/cm_scale),int(shape[2]/cm_scale)
+
+    num_bins = num_bins_x*num_bins_y*num_bins_z
+
+    x0,y0,z0 = np.arange(num_bins_x),np.arange(num_bins_y),np.arange(num_bins_z)
+    xg,yg,zg = np.meshgrid(x0,y0,z0)
+
+    cm3d = np.concatenate([xg.reshape([num_bins,1]),yg.reshape([num_bins,1]),zg.reshape([num_bins,1])],axis=1)\
+
+    if(binLengths):
+        return cm3d,num_bins_x,num_bins_y,num_bins_z
+    else:
+        return cm3d
