@@ -326,8 +326,8 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, split=2, name=None,#x,nc,cm
          #timestep debug statements ---from here /*...
               if(len(p_tmp)>0):
                   p_rms.append(np.sqrt(np.mean(np.sum(np.stack(p_tmp,axis=0)**2,axis=1),axis=0)))
-                  p_max.append(np.max(np.stack(p_tmp,axis=0)**2))
-                  f_max.append(np.max(np.stack(f_tmp,axis=0)**2))
+                  p_max.append(np.max(np.sqrt(np.stack(p_tmp,axis=0)**2)))
+                  f_max.append(np.max(np.sqrt(np.stack(f_tmp,axis=0)**2)))
               else:
                   p_rms.append(-1)
                   p_max.append(-1)
@@ -560,7 +560,7 @@ def nbody(state, stages, nc, cosmology=Planck15, pm_nc_factor=1,split=2,
     ai = stages[0] #stages is just an array of a values to timestep through
 
     # first force calculation for jump starting
-    state = force(state, nc, pm_nc_factor=pm_nc_factor, cosmology=cosmology,short_range=short_range,cm_scale=cm_scale,eps_s=eps_s,split=split) #initial shape will be (3, batch, nparts, 3)
+    state = force(state, nc, pm_nc_factor=pm_nc_factor, cosmology=cosmology,short_range=False,cm_scale=cm_scale,eps_s=eps_s,split=split) #initial shape will be (3, batch, nparts, 3)
 
     x, p, f = ai, ai, ai #state keeps a running list of position, momentum, and force coordinates in x,y,z for each batch
     # Loop through the stages
@@ -581,7 +581,7 @@ def nbody(state, stages, nc, cosmology=Planck15, pm_nc_factor=1,split=2,
             x_sr,p_sr,f_sr = x,p,f
 
             for ss in range(nsubcycles-1):
-                print("subcycling: step={0} of {1}".format(ss,nsubcycles))
+                print("subcycling: step={0} of {1}".format(ss+1,nsubcycles))
                 print('beginning - x_sr={0:.3f},p_sr={1:.3f},f_sr={2:.3f}'.format(x_sr,p_sr,f_sr))
 
                 a0_s = sub_stages[ss] #current timestep

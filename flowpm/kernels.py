@@ -118,7 +118,8 @@ def shortrange_kernel(x1,x2,eps_s,split=2):
         "can probably come back and pass p2 as a list of positions...drop one of the inner loops"
         disp = p2-p1
         rsq=np.sum((disp**2),axis=0) #simple dist, square in place and sum, sqrt
-        gadget_erfc = erfc(disp/split/2) #to send force to zero if too large, but in theory shouldn't be a problem since not computing beyond 1 neighbor anyway
+        r = np.sqrt(rsq)
+        gadget_erfc = erfc(r/split/2) + r/(np.sqrt(np.pi)*split) * erfc(-r**2 /split**2 /4) #to send force to zero if too large, but in theory shouldn't be a problem since not computing beyond 1 neighbor anyway
 
         kernel = (rsq  +eps_s**2)**(-3/2)
         plummer = kernel*disp*gadget_erfc #kernel*disp
