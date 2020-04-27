@@ -5,6 +5,7 @@ from __future__ import print_function
 
 import numpy as np
 import tensorflow as tf
+from scipy.special import erfc
 
 def fftk(shape, symmetric=True, finite=False, dtype=np.float64):
   """ Return k_vector given a shape (nc, nc, nc) and box_size
@@ -97,7 +98,7 @@ def longrange_kernel(kvec, r_split):
   else:
     return 1.
 
-def shortrange_kernel(x1,x2,eps_s):
+def shortrange_kernel(x1,x2,eps_s,split=2):
     """
     Computes short range force "kernel"
     Parameters:
@@ -117,9 +118,10 @@ def shortrange_kernel(x1,x2,eps_s):
         "can probably come back and pass p2 as a list of positions...drop one of the inner loops"
         disp = p2-p1
         rsq=np.sum((disp**2),axis=0) #simple dist, square in place and sum, sqrt
+        gadget_erfc = erfc(disp/split/2) #to send force to zero if too large, but in theory shouldn't be a problem since not computing beyond 1 neighbor anyway
 
         kernel = (rsq  +eps_s**2)**(-3/2)
-        plummer = disp*kernel
+        plummer = kernel*disp*gadget_erfc #kernel*disp
         return plummer
 
     #Idea is to replace this with spline...

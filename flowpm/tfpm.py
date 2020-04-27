@@ -201,7 +201,8 @@ def apply_longrange(x, delta_k, split=0, factor=1, kvec=None, name=None):
     return f
 
 
-def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, name=None):#x,nc,cm_scale=4, eps_s=.05, name=None):
+def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, split=2, name=None,#x,nc,cm_scale=4, eps_s=.05, name=None):
+                     nsubcycles=1): #adding nsubcycles for eta comparison
 
   '''
   Note that everything is in numpy right now for testing - using TF at the moment is too slow to run in my dumb implementation of loops.
@@ -220,6 +221,8 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, name=None):#x,nc,cm_scale=4
       shape = x.get_shape()
       batch_size,npart = shape[0].value,shape[1].value
 
+
+
       #Have to do this to be able to do the particle computation, if you are forced to use
       #TF tensors when constructing bins (i.e. without calling x to get bin values), it is
       #excruciatingly slow (10^4 x slower than non-TF numpy for loop) due to graph additions in every loop - need to figure this out...
@@ -230,6 +233,16 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, name=None):#x,nc,cm_scale=4
           p_eval = p.eval()
           f_eval = f.eval()
 
+      with tf.Session() as sess: print('min x={0}, max x={1}'.format(np.max(x_eval),
+                                                                               np.min(x_eval)
+                                                                               ))
+
+      x_eval = x_eval % nc
+
+      with tf.Session() as sess: print('Post mod (what SR sees) min x={0}, max x={1}'.format(np.max(x_eval),
+                                                                               np.min(x_eval)
+                                                                               ))
+
       #bin the particles
       num_bins_1d = int(nc/cm_scale)
       num_bins = num_bins_1d**2
@@ -238,10 +251,6 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, name=None):#x,nc,cm_scale=4
 
 
       cm_cells,nbx,nby,nbz = chain_mesh((nc_x,nc_y,nc_z),cm_scale,binLengths=True) #assume full box for now, but could e.g. split along z axis an make nc_z shorter than others
-      print('Cmcells shape',cm_cells.shape)
-      print('bin size',bin_size)
-      print('num_bins_1d',num_bins_1d)
-      print('xeval shape',x_eval.shape)
 
 
       #probably a better way to do this in one line but...
@@ -309,14 +318,14 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, name=None):#x,nc,cm_scale=4
 
                       for m in range(bin_count_array[nb[0],nb[1],nb[2]]): #loop once over all neighbor particles via neighbor_cell * particles_per_cell~ O(27*parts_per_cm_cell)
                             idx2 = LL[HOC_array[nb[0],nb[1],nb[2]]-m -1]
-                            f_neighbor.append(shortrange_kernel(x_eval[batch_idx,idx1],x_eval[batch_idx,idx2],eps_s)) #actually evaluate force between 2 particles
+                            f_neighbor.append(shortrange_kernel(x_eval[batch_idx,idx1] % nc ,x_eval[batch_idx,idx2] % nc,eps_s,split=split)) #actually evaluate force between 2 particles
 
                   f_single = np.stack(f_neighbor,axis=0)
                   f_all.append(np.sum(f_single,axis=0)) #sum force on a single particle
 
          #timestep debug statements ---from here /*...
               if(len(p_tmp)>0):
-                  p_rms.append(np.sqrt(np.mean(np.stack(p_tmp,axis=0)**2)))
+                  p_rms.append(np.sqrt(np.mean(np.sum(np.stack(p_tmp,axis=0)**2,axis=1),axis=0)))
                   p_max.append(np.max(np.stack(p_tmp,axis=0)**2))
                   f_max.append(np.max(np.stack(f_tmp,axis=0)**2))
               else:
@@ -328,18 +337,16 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, name=None):#x,nc,cm_scale=4
           f_max = np.stack(f_max,axis=0)
 
           def_step = 0.1 #the default a value of 0.1 for stages, used for
+          sr_step = def_step/nsubcycles
 
           #for our fixed step, the equivalent value of eta and zeta
-          eta = def_step/(p_rms/f_max)
-          zeta = def_step*(p_max/bin_size)
-          print('eta',eta)
-          print('zeta',zeta)
+          eta_def = def_step/(p_rms/f_max)
+          zeta_def = def_step*(p_max/bin_size)
+          eta = sr_step/(p_rms/f_max)
+          zeta = sr_step*(p_max/bin_size)
 
-          print('global min eta',np.min(eta))
-          print('global max eta',np.max(eta))
-
-          print('global min zeta',np.min(zeta))
-          print('global max zeta',np.max(zeta))
+          print('global max eta for default timestep is {0:.2f}, and for sr timestep is {1:.2f}'.format(np.max(eta_def),np.max(eta)))
+          print('global max zeta for default timestep is {0:.2f} and for sr timestep is {1:.2f}'.format(np.max(zeta_def),np.max(zeta)))
 
           #to here...*/
 
@@ -414,7 +421,7 @@ def drift(state, ai, ac, af, cosmology=Planck15, dtype=np.float32,
 
 def force(state, nc, cosmology=Planck15, pm_nc_factor=1, kvec=None,
           dtype=np.float32,
-          short_range=False, cm_scale=4,eps_s=0.05,
+          short_range=False, cm_scale=4,eps_s=0.05,split=2,
           name=None, **kwargs):
   """
   Estimate force on the particles given a state.
@@ -446,7 +453,7 @@ def force(state, nc, cosmology=Planck15, pm_nc_factor=1, kvec=None,
     rho = tf.multiply(rho, 1./nbar)
     delta_k = r2c3d(rho, norm=ncf**3)
     fac = dtype(1.5 * cosmology.Om0)
-    update = apply_longrange(tf.multiply(state[0], pm_nc_factor), delta_k, split=0, factor=fac)
+    update = apply_longrange(tf.multiply(state[0], pm_nc_factor), delta_k, split=split, factor=fac)
 
     '''Short-range force correction goes here.'''
     #debugging to see how big accel in SR is vs LR
@@ -455,7 +462,7 @@ def force(state, nc, cosmology=Planck15, pm_nc_factor=1, kvec=None,
 
     if(short_range):
         '''Put this back to only passing state[0]  (x) when done debugging'''
-        update_short = apply_shortrange(state,nc,cm_scale=cm_scale,eps_s=eps_s)
+        update_short = apply_shortrange(state,nc,cm_scale=cm_scale,eps_s=eps_s,split=split)
 
         update = tf.add(update, update_short)
         with tf.Session() as sess:
@@ -473,8 +480,53 @@ def force(state, nc, cosmology=Planck15, pm_nc_factor=1, kvec=None,
     state = tf.add(state, update)
     return state
 
-def nbody(state, stages, nc, cosmology=Planck15, pm_nc_factor=1,
-          short_range=False, cm_scale=4,eps_s=0.05,
+def force_sr(state, nc, cosmology=Planck15,
+          dtype=np.float32,
+          cm_scale=4,eps_s=0.05,split=2,
+          nsubcycles=1, #again, add subcycles for debug eta
+          name=None, **kwargs):
+  """
+  Short-range force, only calls short-range function.
+
+  Parameters:
+  -----------
+  state: tensor
+    Input state tensor of shape (3, batch_size, npart, 3) #where does this leading 3 come from??
+
+  boxsize: float
+    Size of the simulation volume (Mpc/h) TODO: check units
+
+  cosmology: astropy.cosmology
+    Cosmology object
+
+  pm_nc_factor: int
+    TODO: @modichirag please add doc
+  """
+  with tf.name_scope(name, "Force", [state]):
+    shape = state.get_shape()
+    batch_size = shape[1]
+
+    '''Short-range force correction goes here.'''
+
+    '''Put this back to only passing state[0]  (x) when done debugging'''
+    update_short = apply_shortrange(state,nc,cm_scale=cm_scale,eps_s=eps_s,nsubcycles=nsubcycles,split=split)
+
+    with tf.Session() as sess:
+        print('dbug max SR force is', tf.reduce_max(update_short).eval())
+
+    update = tf.expand_dims(update_short, axis=0)
+
+    indices = tf.constant([[2]])
+    shape = state.shape
+    update = tf.scatter_nd(indices, update, shape)
+    mask = tf.stack((tf.ones_like(state[0]), tf.ones_like(state[0]), tf.zeros_like(state[0])), axis=0)
+
+    state = tf.multiply(state, mask)
+    state = tf.add(state, update)
+    return state
+
+def nbody(state, stages, nc, cosmology=Planck15, pm_nc_factor=1,split=2,
+          short_range=False, cm_scale=4,eps_s=0.05,nsubcycles = 2,
           name=None):
   """
   Integrate the evolution of the state across the givent stages
@@ -508,7 +560,7 @@ def nbody(state, stages, nc, cosmology=Planck15, pm_nc_factor=1,
     ai = stages[0] #stages is just an array of a values to timestep through
 
     # first force calculation for jump starting
-    state = force(state, nc, pm_nc_factor=pm_nc_factor, cosmology=cosmology,short_range=short_range,cm_scale=cm_scale,eps_s=eps_s) #initial shape will be (3, batch, nparts, 3)
+    state = force(state, nc, pm_nc_factor=pm_nc_factor, cosmology=cosmology,short_range=short_range,cm_scale=cm_scale,eps_s=eps_s,split=split) #initial shape will be (3, batch, nparts, 3)
 
     x, p, f = ai, ai, ai #state keeps a running list of position, momentum, and force coordinates in x,y,z for each batch
     # Loop through the stages
@@ -517,24 +569,53 @@ def nbody(state, stages, nc, cosmology=Planck15, pm_nc_factor=1,
         a1 = stages[i + 1] #upcoming timestep
         ah = (a0 * a1) ** 0.5 #geometric mean - see fastPM
 
-        #Debug check drift in x, particles are going far out of box due to too large timestep
-        with tf.Session() as sess: print('min x={0}, max x={1}, step a={2}'.format(tf.reduce_max(state[0]).eval(),
-                                                                                 tf.reduce_min(state[0]).eval(),
-                                                                                 a0))
-        # Kick step
-        state = kick(state, p, f, ah, cosmology=cosmology) #kick at mean step
+        #Long range kick
+        state = kick(state, p, f, ah, cosmology=cosmology) #kick at long range timestep, remains unchanged
         p = ah
 
-        # Drift step
-        state = drift(state, x, p, a1, cosmology=cosmology) #drift at full step
-        x = a1
+        if(short_range):
+            #now split into substeps (say 2)
+            print("in short range")
+            sub_stages = np.linspace(a0,a1,nsubcycles+1)
+            print('substages', sub_stages)
+            x_sr,p_sr,f_sr = x,p,f
 
-        # Force
-        state = force(state, nc, pm_nc_factor=pm_nc_factor, cosmology=cosmology,short_range=short_range,cm_scale=cm_scale,eps_s=eps_s) #update force at full step
+            for ss in range(nsubcycles-1):
+                print("subcycling: step={0} of {1}".format(ss,nsubcycles))
+                print('beginning - x_sr={0:.3f},p_sr={1:.3f},f_sr={2:.3f}'.format(x_sr,p_sr,f_sr))
+
+                a0_s = sub_stages[ss] #current timestep
+                a1_s = sub_stages[ss + 1] #upcoming timestep
+                ah_s = (a0_s * a1_s) ** 0.5 #half step for sr kick
+
+                #short range sub-kick at half step - ideally only want to kick those that need it but leaving that alone for now-will need to define function that only kicks some
+                state = kick(state, p_sr, f_sr, ah_s, cosmology=cosmology) #kick at short-range timestep,
+                p_sr = ah_s
+
+                #short-range sub-drift at full sub step
+                state = drift(state, x_sr, p_sr, a1_s, cosmology=cosmology) #drift everyone at SR timestep
+                x_sr = a1_s
+
+                #need to corral stray particles back inside the box (the absolute distance matters for the p-p kernel, can also go back and change the kernel)
+
+                #short-range force and subsequent kick at half step
+                state = force_sr(state, nc,cosmology=cosmology,cm_scale=cm_scale,eps_s=eps_s,nsubcycles=nsubcycles,split=split) #update force at SR
+                f_sr = a1_s
+
+                state = kick(state, p_sr, f_sr, a1_s, cosmology=cosmology) #kick again at short range timestep
+                p_sr =  a1_s
+
+                print('end - x_sr={0:.3f},p_sr={1:.3f},f_sr={2:.3f}'.format(x_sr,p_sr,f_sr))
+
+
+        #Long range force on long timestep from stages
+        state = force(state, nc, pm_nc_factor=pm_nc_factor,cosmology=cosmology,short_range=False,cm_scale=cm_scale,eps_s=eps_s,split=split) #update force at SR
         f = a1
-
-        # Kick again
-        state = kick(state, p, f, a1, cosmology=cosmology) #kick at full step
+        #long range kick again
+        state = kick(state, p, f, a1, cosmology=cosmology) #kick at long range timestep, remains unchanged
         p = a1
+
+
+
 
     return state
