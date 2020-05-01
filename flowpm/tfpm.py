@@ -202,7 +202,7 @@ def apply_longrange(x, delta_k, split=0, factor=1, kvec=None, name=None):
 
 
 def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, split=2, name=None,#x,nc,cm_scale=4, eps_s=.05, name=None):
-                     nsubcycles=1): #adding nsubcycles for eta comparison
+                     nsubcycles=1, com_approx=False): #adding nsubcycles for eta comparison
 
   '''
   Note that everything is in numpy right now for testing - using TF at the moment is too slow to run in my dumb implementation of loops.
@@ -297,6 +297,26 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, split=2, name=None,#x,nc,cm
           p_rms,p_max,f_max =[],[],[] #debug lists
 
 
+          #compute center of mass
+          if(com_approx):
+              coms = np.zeros((nbx,nby,nbz,3))
+              num_in_bin = np.zeros((nbx,nby,nbz))
+              for b in cm_cells:
+                  #num_in_bin[0
+                  com_tmp=[]
+                  for k in range(bin_count_array[b[0],b[1],b[2]]):
+                      idx1 = LL[HOC_array[b[0],b[1],b[2]]-k-1]
+                      com_tmp.append(x_eval[batch_idx,idx1] % nc)
+                      num_in_bin[b[0],b[1],b[2]]+=1
+                  if(num_in_bin[b[0],b[1],b[2]]>1):
+                     # print(np.mean(np.asarray(com_tmp,dtype=np.float32),axis=0)*num_in_bin)
+                      coms[b[0],b[1],b[2]] = np.mean(np.asarray(com_tmp,dtype=np.float32),axis=0)
+                  else:
+                      coms[b[0],b[1],b[2]] = -1000*np.ones(3)
+
+          print("before passing to GPU remember to 1. reshape HOC, 2. ")
+          print("Using center of mass approximation")
+
           for b in cm_cells: #loop over CM cells
               p_tmp,f_tmp =[],[] #debug lists
 
@@ -316,9 +336,14 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, split=2, name=None,#x,nc,cm
                       #PBCs
                       nb = nb % num_bins_1d
 
-                      for m in range(bin_count_array[nb[0],nb[1],nb[2]]): #loop once over all neighbor particles via neighbor_cell * particles_per_cell~ O(27*parts_per_cm_cell)
-                            idx2 = LL[HOC_array[nb[0],nb[1],nb[2]]-m -1]
-                            f_neighbor.append(shortrange_kernel(x_eval[batch_idx,idx1] % nc ,x_eval[batch_idx,idx2] % nc,eps_s,split=split)) #actually evaluate force between 2 particles
+                      if(com_approx): #approximate neighborbins by center of mass
+                          f_neighbor.append(shortrange_kernel(x_eval[batch_idx,idx1] % nc, coms[nb[0],nb[1],nb[2]] % nc,eps_s,split=split)*num_in_bin[nb[0],nb[1],nb[2]])
+                      else: #the exact calculation
+                          for m in range(bin_count_array[nb[0],nb[1],nb[2]]): #loop once over all neighbor particles via neighbor_cell * particles_per_cell~ O(27*parts_per_cm_cell)
+                                idx2 = LL[HOC_array[nb[0],nb[1],nb[2]]-m -1]
+                                f_neighbor.append(shortrange_kernel(x_eval[batch_idx,idx1] % nc ,x_eval[batch_idx,idx2] % nc,eps_s,split=split)) #actually evaluate force between 2 particles
+
+
 
                   f_single = np.stack(f_neighbor,axis=0)
                   f_all.append(np.sum(f_single,axis=0)) #sum force on a single particle
@@ -326,8 +351,8 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, split=2, name=None,#x,nc,cm
          #timestep debug statements ---from here /*...
               if(len(p_tmp)>0):
                   p_rms.append(np.sqrt(np.mean(np.sum(np.stack(p_tmp,axis=0)**2,axis=1),axis=0)))
-                  p_max.append(np.max(np.sqrt(np.stack(p_tmp,axis=0)**2)))
-                  f_max.append(np.max(np.sqrt(np.stack(f_tmp,axis=0)**2)))
+                  p_max.append(np.max(np.sqrt(np.sum(np.stack(p_tmp,axis=0)**2,axis=1))))
+                  f_max.append(np.max(np.sqrt(np.sum(np.stack(f_tmp,axis=0)**2,axis=1))))
               else:
                   p_rms.append(-1)
                   p_max.append(-1)
@@ -421,7 +446,7 @@ def drift(state, ai, ac, af, cosmology=Planck15, dtype=np.float32,
 
 def force(state, nc, cosmology=Planck15, pm_nc_factor=1, kvec=None,
           dtype=np.float32,
-          short_range=False, cm_scale=4,eps_s=0.05,split=2,
+          short_range=False, cm_scale=4,eps_s=0.05,split=2,comm_approx=False,
           name=None, **kwargs):
   """
   Estimate force on the particles given a state.
@@ -453,7 +478,7 @@ def force(state, nc, cosmology=Planck15, pm_nc_factor=1, kvec=None,
     rho = tf.multiply(rho, 1./nbar)
     delta_k = r2c3d(rho, norm=ncf**3)
     fac = dtype(1.5 * cosmology.Om0)
-    update = apply_longrange(tf.multiply(state[0], pm_nc_factor), delta_k, split=split, factor=fac)
+    update = apply_longrange(tf.multiply(state[0], pm_nc_factor), delta_k, split=split, factor=fac,comm_approx=comm_approx)
 
     '''Short-range force correction goes here.'''
     #debugging to see how big accel in SR is vs LR
@@ -484,6 +509,7 @@ def force_sr(state, nc, cosmology=Planck15,
           dtype=np.float32,
           cm_scale=4,eps_s=0.05,split=2,
           nsubcycles=1, #again, add subcycles for debug eta
+          comm_approx=False,
           name=None, **kwargs):
   """
   Short-range force, only calls short-range function.
@@ -509,7 +535,7 @@ def force_sr(state, nc, cosmology=Planck15,
     '''Short-range force correction goes here.'''
 
     '''Put this back to only passing state[0]  (x) when done debugging'''
-    update_short = apply_shortrange(state,nc,cm_scale=cm_scale,eps_s=eps_s,nsubcycles=nsubcycles,split=split)
+    update_short = apply_shortrange(state,nc,cm_scale=cm_scale,eps_s=eps_s,nsubcycles=nsubcycles,split=split,comm_approx=comm_approx)
 
     with tf.Session() as sess:
         print('dbug max SR force is', tf.reduce_max(update_short).eval())
@@ -526,7 +552,7 @@ def force_sr(state, nc, cosmology=Planck15,
     return state
 
 def nbody(state, stages, nc, cosmology=Planck15, pm_nc_factor=1,split=2,
-          short_range=False, cm_scale=4,eps_s=0.05,nsubcycles = 2,
+          short_range=False, cm_scale=4,eps_s=0.05,nsubcycles = 2,comm_approx=False,
           name=None):
   """
   Integrate the evolution of the state across the givent stages
@@ -560,7 +586,7 @@ def nbody(state, stages, nc, cosmology=Planck15, pm_nc_factor=1,split=2,
     ai = stages[0] #stages is just an array of a values to timestep through
 
     # first force calculation for jump starting
-    state = force(state, nc, pm_nc_factor=pm_nc_factor, cosmology=cosmology,short_range=False,cm_scale=cm_scale,eps_s=eps_s,split=split) #initial shape will be (3, batch, nparts, 3)
+    state = force(state, nc, pm_nc_factor=pm_nc_factor, cosmology=cosmology,short_range=short_range,cm_scale=cm_scale,eps_s=eps_s,split=split,comm_approx=comm_approx) #initial shape will be (3, batch, nparts, 3)
 
     x, p, f = ai, ai, ai #state keeps a running list of position, momentum, and force coordinates in x,y,z for each batch
     # Loop through the stages
@@ -599,7 +625,7 @@ def nbody(state, stages, nc, cosmology=Planck15, pm_nc_factor=1,split=2,
                 #need to corral stray particles back inside the box (the absolute distance matters for the p-p kernel, can also go back and change the kernel)
 
                 #short-range force and subsequent kick at half step
-                state = force_sr(state, nc,cosmology=cosmology,cm_scale=cm_scale,eps_s=eps_s,nsubcycles=nsubcycles,split=split) #update force at SR
+                state = force_sr(state, nc,cosmology=cosmology,cm_scale=cm_scale,eps_s=eps_s,nsubcycles=nsubcycles,split=split,comm_approx=comm_approx) #update force at SR
                 f_sr = a1_s
 
                 state = kick(state, p_sr, f_sr, a1_s, cosmology=cosmology) #kick again at short range timestep

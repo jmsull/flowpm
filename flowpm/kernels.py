@@ -116,6 +116,9 @@ def shortrange_kernel(x1,x2,eps_s,split=2):
         "Input: single-particle Position  (3), particle you want to get current force on, softening length"
         "Output: single-particle Force (3) - last entry of state"
         "can probably come back and pass p2 as a list of positions...drop one of the inner loops"
+        # if(np.any(p2)<-900):
+        #     return 0
+
         disp = p2-p1
         rsq=np.sum((disp**2),axis=0) #simple dist, square in place and sum, sqrt
         r = np.sqrt(rsq)
