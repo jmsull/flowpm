@@ -221,7 +221,9 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, split=2, name=None,#x,nc,cm
       shape = x.get_shape()
       batch_size,npart = shape[0].value,shape[1].value
 
-
+      # print('saving gpu kernel test...')
+      # np.save('gpu_test_hoc.npy',HOC_array)
+      # np.save('gpu_test_ll.npy',LL)
 
       #Have to do this to be able to do the particle computation, if you are forced to use
       #TF tensors when constructing bins (i.e. without calling x to get bin values), it is
@@ -446,7 +448,7 @@ def drift(state, ai, ac, af, cosmology=Planck15, dtype=np.float32,
 
 def force(state, nc, cosmology=Planck15, pm_nc_factor=1, kvec=None,
           dtype=np.float32,
-          short_range=False, cm_scale=4,eps_s=0.05,split=2,comm_approx=False,
+          short_range=False, cm_scale=4,eps_s=0.05,split=2,com_approx=False,
           name=None, **kwargs):
   """
   Estimate force on the particles given a state.
@@ -478,7 +480,7 @@ def force(state, nc, cosmology=Planck15, pm_nc_factor=1, kvec=None,
     rho = tf.multiply(rho, 1./nbar)
     delta_k = r2c3d(rho, norm=ncf**3)
     fac = dtype(1.5 * cosmology.Om0)
-    update = apply_longrange(tf.multiply(state[0], pm_nc_factor), delta_k, split=split, factor=fac,comm_approx=comm_approx)
+    update = apply_longrange(tf.multiply(state[0], pm_nc_factor), delta_k, split=split, factor=fac)
 
     '''Short-range force correction goes here.'''
     #debugging to see how big accel in SR is vs LR
@@ -487,7 +489,7 @@ def force(state, nc, cosmology=Planck15, pm_nc_factor=1, kvec=None,
 
     if(short_range):
         '''Put this back to only passing state[0]  (x) when done debugging'''
-        update_short = apply_shortrange(state,nc,cm_scale=cm_scale,eps_s=eps_s,split=split)
+        update_short = apply_shortrange(state,nc,cm_scale=cm_scale,eps_s=eps_s,split=split,com_approx=com_approx)
 
         update = tf.add(update, update_short)
         with tf.Session() as sess:
@@ -509,7 +511,7 @@ def force_sr(state, nc, cosmology=Planck15,
           dtype=np.float32,
           cm_scale=4,eps_s=0.05,split=2,
           nsubcycles=1, #again, add subcycles for debug eta
-          comm_approx=False,
+          com_approx=False,
           name=None, **kwargs):
   """
   Short-range force, only calls short-range function.
@@ -535,7 +537,7 @@ def force_sr(state, nc, cosmology=Planck15,
     '''Short-range force correction goes here.'''
 
     '''Put this back to only passing state[0]  (x) when done debugging'''
-    update_short = apply_shortrange(state,nc,cm_scale=cm_scale,eps_s=eps_s,nsubcycles=nsubcycles,split=split,comm_approx=comm_approx)
+    update_short = apply_shortrange(state,nc,cm_scale=cm_scale,eps_s=eps_s,nsubcycles=nsubcycles,split=split,com_approx=com_approx)
 
     with tf.Session() as sess:
         print('dbug max SR force is', tf.reduce_max(update_short).eval())
@@ -552,7 +554,7 @@ def force_sr(state, nc, cosmology=Planck15,
     return state
 
 def nbody(state, stages, nc, cosmology=Planck15, pm_nc_factor=1,split=2,
-          short_range=False, cm_scale=4,eps_s=0.05,nsubcycles = 2,comm_approx=False,
+          short_range=False, cm_scale=4,eps_s=0.05,nsubcycles = 2,com_approx=False,
           name=None):
   """
   Integrate the evolution of the state across the givent stages
@@ -586,7 +588,7 @@ def nbody(state, stages, nc, cosmology=Planck15, pm_nc_factor=1,split=2,
     ai = stages[0] #stages is just an array of a values to timestep through
 
     # first force calculation for jump starting
-    state = force(state, nc, pm_nc_factor=pm_nc_factor, cosmology=cosmology,short_range=short_range,cm_scale=cm_scale,eps_s=eps_s,split=split,comm_approx=comm_approx) #initial shape will be (3, batch, nparts, 3)
+    state = force(state, nc, pm_nc_factor=pm_nc_factor, cosmology=cosmology,short_range=short_range,cm_scale=cm_scale,eps_s=eps_s,split=split,com_approx=com_approx) #initial shape will be (3, batch, nparts, 3)
 
     x, p, f = ai, ai, ai #state keeps a running list of position, momentum, and force coordinates in x,y,z for each batch
     # Loop through the stages
@@ -625,7 +627,7 @@ def nbody(state, stages, nc, cosmology=Planck15, pm_nc_factor=1,split=2,
                 #need to corral stray particles back inside the box (the absolute distance matters for the p-p kernel, can also go back and change the kernel)
 
                 #short-range force and subsequent kick at half step
-                state = force_sr(state, nc,cosmology=cosmology,cm_scale=cm_scale,eps_s=eps_s,nsubcycles=nsubcycles,split=split,comm_approx=comm_approx) #update force at SR
+                state = force_sr(state, nc,cosmology=cosmology,cm_scale=cm_scale,eps_s=eps_s,nsubcycles=nsubcycles,split=split,com_approx=com_approx) #update force at SR
                 f_sr = a1_s
 
                 state = kick(state, p_sr, f_sr, a1_s, cosmology=cosmology) #kick again at short range timestep
