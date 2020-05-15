@@ -119,14 +119,54 @@ def shortrange_kernel(x1,x2,eps_s,split=2):
         # if(np.any(p2)<-900):
         #     return 0
 
-        disp = p2-p1
-        rsq=np.sum((disp**2),axis=0) #simple dist, square in place and sum, sqrt
-        r = np.sqrt(rsq)
-        gadget_erfc = erfc(r/split/2) + r/(np.sqrt(np.pi)*split) * erfc(-r**2 /split**2 /4) #to send force to zero if too large, but in theory shouldn't be a problem since not computing beyond 1 neighbor anyway
+        # disp = p2-p1
+        # rsq=np.sum((disp**2),axis=0) #simple dist, square in place and sum, sqrt
+        # r = np.sqrt(rsq)
+        # gadget_erfc = erfc(r/split/2) + r/(np.sqrt(np.pi)*split) * erfc(-r**2 /split**2 /4) #to send force to zero if too large, but in theory shouldn't be a problem since not computing beyond 1 neighbor anyway
+        #
+        # kernel = (rsq  +eps_s**2)**(-3/2)
+        # plummer = kernel*disp*gadget_erfc #kernel*disp
+        # return plummer
 
-        kernel = (rsq  +eps_s**2)**(-3/2)
-        plummer = kernel*disp*gadget_erfc #kernel*disp
-        return plummer
+        disp = p2-p1
+
+        #PBCs
+        if(p2[0]-p1[0]>2.*1.): #max allowed displacement is 2*cm_scale*sqrt(2) ~ 2.83 but in 1D we will say it is 2
+                if(8.-p1[0] <1.):
+                    p1[0] = 8.-p1[0]
+                if(8.-p2[0] <8.):
+                    p2[0] = 8.-p2[0]
+                disp[0] = p2[0]-p1[0]
+        if(p2[1]-p1[1]>2.*1.):
+                if(8.-p1[1] <1.):
+                    p1[1] = 8.-p1[1]
+                if(8.-p2[1] <8.):
+                    p2[1] = 8.-p2[1]
+                disp[1] = p2[1]-p1[1]
+        if(p2[2]-p1[2]>2.*1.):
+                if(8.-p1[2] <1.):
+                    p1[2] = 8.-p1[2]
+                if(8.-p2[2] <8.):
+                    p2[2] = 8.-p2[2]
+                disp[2] = p2[2]-p1[2]
+        #r=tf.sqrt(tf.reduce_sum((disp**2),axis=0)) #simple dist, square in place and sum, sqrt
+        r2=np.sum((disp**2),axis=0) #simple dist, square in place and sum, sqrt
+
+        eps_s2 = eps_s*eps_s
+        splitd = split/2.
+        splitd2 = splitd*splitd
+        splitp = (np.pi**.5)*split
+        #replacing this with spline kernel and gadget smoothing factor
+        r = r2**.5
+        if (r<eps_s):
+            spline = (10. - 15.*(r/eps_s) + 6.*(r2 /(eps_s2)))/(eps_s2*eps_s)
+        else:
+            spline = 1./(r2*r)
+        gadget_factor = erfc(r/splitd) + r/(splitp) * erfc(r2 /splitd2)
+        coef = gadget_factor *spline
+        force = coef*disp
+
+        return force
 
     #Idea is to replace this with spline...
 
@@ -144,7 +184,11 @@ def chain_mesh(shape,cm_scale,binLengths=False):
     x0,y0,z0 = np.arange(num_bins_x),np.arange(num_bins_y),np.arange(num_bins_z)
     xg,yg,zg = np.meshgrid(x0,y0,z0)
 
-    cm3d = np.concatenate([xg.reshape([num_bins,1]),yg.reshape([num_bins,1]),zg.reshape([num_bins,1])],axis=1)\
+    #cm3d = np.concatenate([xg.reshape([num_bins,1]),yg.reshape([num_bins,1]),zg.reshape([num_bins,1])],axis=1)
+    #ascending
+    cm3d = np.concatenate([yg.reshape([num_bins,1]),xg.reshape([num_bins,1]),zg.reshape([num_bins,1])],axis=1)
+    #cm3d = np.concatenate([zg.reshape([num_bins,1]),xg.reshape([num_bins,1]),yg.reshape([num_bins,1])],axis=1)
+    #descengin
 
     if(binLengths):
         return cm3d,num_bins_x,num_bins_y,num_bins_z

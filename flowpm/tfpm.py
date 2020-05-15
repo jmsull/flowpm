@@ -221,9 +221,7 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, split=2, name=None,#x,nc,cm
       shape = x.get_shape()
       batch_size,npart = shape[0].value,shape[1].value
 
-      # print('saving gpu kernel test...')
-      # np.save('gpu_test_hoc.npy',HOC_array)
-      # np.save('gpu_test_ll.npy',LL)
+
 
       #Have to do this to be able to do the particle computation, if you are forced to use
       #TF tensors when constructing bins (i.e. without calling x to get bin values), it is
@@ -254,6 +252,10 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, split=2, name=None,#x,nc,cm
 
       cm_cells,nbx,nby,nbz = chain_mesh((nc_x,nc_y,nc_z),cm_scale,binLengths=True) #assume full box for now, but could e.g. split along z axis an make nc_z shorter than others
 
+      #FIXME: quick fix for reversed order when comparing to C test
+      # print(cm_cells.shape)
+      # for i in range(cm_cells.shape[0]):
+      #     cm_cells[i] = cm_cells.T
 
       #probably a better way to do this in one line but...
       neighbor_stencil_array = np.array([
@@ -276,56 +278,71 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, split=2, name=None,#x,nc,cm
       '''Loop over '''
       for batch_idx in range(batch_size): #presumably we will not run multiple batches with particles on?
 
-          bin_array = ((x_eval[batch_idx]% nc)/bin_size).astype(np.int32) #send negative x to other side where they belong
-
           #Hockney and Eastwood Chaining mesh - for now will store bin locations as vectors but can come back and set C index
-          HOC_array = np.zeros((nbx,nby,nbz),dtype=np.int32)
-          bin_count_array = np.copy(HOC_array)
+          #HOC_array = np.zeros((nbx,nby,nbz),dtype=np.int32)
+          HOC_array = -1*np.ones(nbx*nby*nbz,dtype=np.int32)
 
-          LL = np.zeros((npart),dtype=np.int32) #linked list for particles in the same bin within the same bin, 0 o.w.
+          bin_count_array = np.zeros(HOC_array.shape,dtype=np.int32)
+
+          #LL = np.zeros(npart,dtype=np.int32) #linked list for particles in the same bin within the same bin, 0 o.w.
+          LL = -1*np.ones(npart,dtype=np.int32) #linked list for particles in the same bin within the same bin, 0 o.w.
 
 
           '''Not TF - don't need it for bin bookkeeping'''
           #fill the chaining mesh
           for i in range(npart):
-              bin_vector = bin_array[i]
+              '''FIXME allow for  x y and z cm_scale'''
+              bin_vector = np.array([int(x_eval[batch_idx,i,0]/cm_scale) , int(x_eval[batch_idx,i,1]/cm_scale) , int(x_eval[batch_idx,i,2]/cm_scale)],
+                                    dtype=np.int32)
 
-              LL[i] = (HOC_array[bin_vector[0],bin_vector[1],bin_vector[2]])
-              HOC_array[bin_vector[0],bin_vector[1],bin_vector[2]] = i+1
-              bin_count_array[bin_vector[0],bin_vector[1],bin_vector[2]]+=1
+              LL[i] = HOC_array[bin_vector[0]+bin_vector[1]*nbx+bin_vector[2]*nbx*nby]
+              HOC_array[bin_vector[0]+bin_vector[1]*nbx+bin_vector[2]*nbx*nby] = i
+              bin_count_array[bin_vector[0]+bin_vector[1]*nbx+bin_vector[2]*nbx*nby]+=1
+
 
           f_all = [] #to store the total sr force for one particle
+          f_arr = np.zeros((npart,3),dtype=np.float32)
+
 
           p_rms,p_max,f_max =[],[],[] #debug lists
 
 
           #compute center of mass
           if(com_approx):
-              coms = np.zeros((nbx,nby,nbz,3))
-              num_in_bin = np.zeros((nbx,nby,nbz))
-              for b in cm_cells:
-                  #num_in_bin[0
+              coms = np.zeros((nbx*nby*nbz,3),dtype=np.float32)
+              num_in_bin = np.zeros(nbx*nby*nbz,dtype=np.int32)
+              #for b in cm_cells:
+              for bidx in range(cm_cells.shape[0]): #loop over CM cells
+
                   com_tmp=[]
-                  for k in range(bin_count_array[b[0],b[1],b[2]]):
-                      idx1 = LL[HOC_array[b[0],b[1],b[2]]-k-1]
-                      com_tmp.append(x_eval[batch_idx,idx1] % nc)
-                      num_in_bin[b[0],b[1],b[2]]+=1
-                  if(num_in_bin[b[0],b[1],b[2]]>1):
+                  for k in range(bin_count_array[bidx]): #loop once over all particles via bins * particles_per_bin ~ O(N)
+                    if(k==0):
+                        idx1 = HOC_array[bidx]
+                    else:
+                        idx1 = LL[idx1] #update using LL
+
+                    com_tmp.append(x_eval[batch_idx,idx1])
+                    num_in_bin[bidx]+=1
+                  if(num_in_bin[bidx]>1):
                      # print(np.mean(np.asarray(com_tmp,dtype=np.float32),axis=0)*num_in_bin)
-                      coms[b[0],b[1],b[2]] = np.mean(np.asarray(com_tmp,dtype=np.float32),axis=0)
+                      coms[bidx] = np.mean(np.asarray(com_tmp,dtype=np.float32),axis=0)
                   else:
-                      coms[b[0],b[1],b[2]] = -1000*np.ones(3)
+                      coms[bidx] = -1000*np.ones(3)
 
-          print("before passing to GPU remember to 1. reshape HOC, 2. ")
-          print("Using center of mass approximation")
+          print('saving gpu kernel test...')
+          np.save('gpu_test_hoc_b{0}.npy'.format(batch_idx),HOC_array)
+          np.save('gpu_test_ll_b{0}.npy'.format(batch_idx),LL)
+          np.save('gpu_test_bincount_b{0}.npy'.format(batch_idx),bin_count_array)
 
-          for b in cm_cells: #loop over CM cells
+          for bidx in range(cm_cells.shape[0]): #loop over CM cells
+
               p_tmp,f_tmp =[],[] #debug lists
 
-              for k in range(bin_count_array[b[0],b[1],b[2]]): #loop once over all particles via bins * particles_per_bin ~ O(N)
-                  #need extra factor of 1 because HOC starts at 1
-
-                  idx1 = LL[HOC_array[b[0],b[1],b[2]]-k-1] #get the index of the "head" particle of this CM cell, decrement until run out of particles
+              for k in range(bin_count_array[bidx]): #loop once over all particles via bins * particles_per_bin ~ O(N)
+                  if(k==0):
+                      idx1 = HOC_array[bidx]
+                  else:
+                      idx1 = LL[idx1] #update using LL
 
                   #debug info for checking timestep
                   p_tmp.append(p_eval[batch_idx,idx1])
@@ -333,22 +350,47 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, split=2, name=None,#x,nc,cm
 
                   f_neighbor = [] #to store force to be computed on this particle due to neighbor particles
                   for j in range(27):
-                      nb = (b+neighbor_stencil_array[j])
+                      nb = (bidx+(neighbor_stencil_array[j][0]
+                                   +neighbor_stencil_array[j][1]*nbx
+                                   +neighbor_stencil_array[j][2]*nbx*nby))
 
-                      #PBCs
-                      nb = nb % num_bins_1d
+                      bx = nb % nbx
+                     # by = (nb // nbx) % nby
+                      by = int(nb / nbx) % nby
+                      bz = int(nb / (nbx*nby)) #jesus casting to int is different from floor
+                      #bz = nb // (nbx*nby))
 
-                      if(com_approx): #approximate neighborbins by center of mass
-                          f_neighbor.append(shortrange_kernel(x_eval[batch_idx,idx1] % nc, coms[nb[0],nb[1],nb[2]] % nc,eps_s,split=split)*num_in_bin[nb[0],nb[1],nb[2]])
+                      if(bx<0):
+                          bx = nbx+bx
+                      if(by<0):
+                          by = nby+by
+                      if(bz<0):
+                          bz = nbz+bz
+                      if(bx>=nbx):
+                          bx = bx-nbx
+                      if(by>=nby):
+                          by = by-nby
+                      if(bz>=nbz):
+                          bz = bz-nbz
+                      nb = bx + by*nbx + bz*nbx*nby
+
+                      if(com_approx): #approximate neighborbins by center of mass - not working with flat
+                          f_neighbor.append(shortrange_kernel(x_eval[batch_idx,idx1] ,coms[nb],eps_s,split=split)) #actually evaluate force between 2 particles
+                          #f_neighbor.append(shortrange_kernel(x_eval[batch_idx,idx1] % nc, coms[nb[0],nb[1],nb[2]] % nc,eps_s,split=split)*num_in_bin[nb[0],nb[1],nb[2]])
                       else: #the exact calculation
-                          for m in range(bin_count_array[nb[0],nb[1],nb[2]]): #loop once over all neighbor particles via neighbor_cell * particles_per_cell~ O(27*parts_per_cm_cell)
-                                idx2 = LL[HOC_array[nb[0],nb[1],nb[2]]-m -1]
-                                f_neighbor.append(shortrange_kernel(x_eval[batch_idx,idx1] % nc ,x_eval[batch_idx,idx2] % nc,eps_s,split=split)) #actually evaluate force between 2 particles
 
+                          for m in range(bin_count_array[nb]): #loop once over all neighbor particles via neighbor_cell * particles_per_cell~ O(27*parts_per_cm_cell)
+                            #idx2 = LL[HOC_array[nb]-m -1]
+                            if(m==0):
+                                idx2 = HOC_array[nb]
+                            else:
+                                idx2 = LL[idx2] #update using LL
 
+                            f_neighbor.append(shortrange_kernel(x_eval[batch_idx,idx1] ,x_eval[batch_idx,idx2],eps_s,split=split)) #actually evaluate force between 2 particles
 
-                  f_single = np.stack(f_neighbor,axis=0)
-                  f_all.append(np.sum(f_single,axis=0)) #sum force on a single particle
+                  f_single = np.stack(f_neighbor,axis=0) #dropping lists for array because idx1 matters
+                  f_arr[idx1] = np.sum(f_single,axis=0)
+                  f_all = f_arr
 
          #timestep debug statements ---from here /*...
               if(len(p_tmp)>0):
@@ -362,6 +404,8 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, split=2, name=None,#x,nc,cm
           p_rms = np.stack(p_rms,axis=0)
           p_max = np.stack(p_max,axis=0)
           f_max = np.stack(f_max,axis=0)
+
+         # np.save("idxs1_b{0}.npy".format(batch_idx),tmp_idxs)
 
           def_step = 0.1 #the default a value of 0.1 for stages, used for
           sr_step = def_step/nsubcycles
@@ -398,9 +442,10 @@ def apply_shortrange(state,nc,cm_scale=4, eps_s=.05, split=2, name=None,#x,nc,cm
 
           f_batch.append(np.stack(f_all,axis=0))
 
-      force_s = np.stack(f_batch,axis=0) \
+      force_s = np.stack(f_batch,axis=0)
 
       #tf force_s = tf.stack(f_batch,axis=0)
+      #np.save("gpu_test_force_only.npy",force_s)
 
       return force_s
 
